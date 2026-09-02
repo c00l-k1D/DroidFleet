@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "droidfleet"
+version = "0.1.0"
+description = "Android USB fleet controller"
+requires-python = ">=3.10"
+dependencies = ["Pillow>=10.0", "psutil>=5.9"]
+
+[project.scripts]
+droidfleet = "app.cli:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

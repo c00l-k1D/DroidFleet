@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "groups": [],
+  "devices": [
+    {
+      "serial": "HGCF2SMV",
+      "device_id": "dev-6dff6dcf8146",
+      "name": "Tablet",
+      "device_type": "Android",
+      "os": "7.0",
+      "model": "Lenovo TB-7304I",
+      "ip": "192.168.31.103",
+      "status": "ONLINE",
+      "battery": "100%",
+      "cpu": "arm64-v8a",
+      "ram": "897 MB",
+      "temperature": "31.0 C",
+      "last_seen": "2026-09-02 22:41:35",
+      "group": "Без группы",
+      "tags": []
+    }
+  ]
+}
