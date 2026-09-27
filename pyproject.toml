@@ -22,7 +22,7 @@ classifiers = [
     "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX",
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = ["Pillow>=10.0", "psutil>=5.9", "pyngrok>=7.2", "PyAutoGUI>=0.9.54"]
 
 [project.scripts]
