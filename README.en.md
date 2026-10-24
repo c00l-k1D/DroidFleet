@@ -2,129 +2,115 @@
 
 [Русская версия](README.md) · **English version**
 
-DroidFleet is a device-fleet management and orchestration platform. The main
-GUI runs on Windows and manages Android devices through ADB and Windows
-computers through FarmAgent. The FarmAgent protocol and server are independent
-of Android and can be used over a LAN, ngrok, or an external server.
+DroidFleet is a cross-platform device-fleet orchestration platform. The main
+GUI runs on Windows while the control plane is designed for HTTPS/self-hosted
+operation without a permanent public tunnel.
 
-The main controller still has the historical class name `AndroidController`;
-in practice it is the shared UI controller and orchestrator for both Android
-and Windows targets.
+The platform supports connections to PC systems as well as Android devices and
+FarmAgent nodes. This allows the same orchestration model to manage desktop
+hosts, mobile devices, and remote worker systems in one control plane.
 
-## Features
+The project targets Python 3.13 and stores sensitive imported account data in
+`data/accounts.enc` rather than in exposed JSON files. The historical name
+`AndroidController` remains for compatibility, but the class is the shared UI
+controller for both Android and Windows workflows.
 
-- Automatic Android discovery for `device`, `offline`, and `unauthorized`
-  states.
-- Persistent Android device cards, groups, tags, filters, and search.
-- Android hardware information: model, Android version, SDK, RAM, storage,
-  battery, temperature, resolution, IP address, and status.
-- Embedded scrcpy preview with mouse and keyboard control.
-- Batch screenshots, reboot, reconnect, shell commands, APK installation,
-  launch, stop, uninstall, and application data cleanup.
-- Full logcat viewer with filtering, buffer clearing, refresh, and export.
-- Worker pools and persistent task storage in `data/tasks.json`.
-- Windows FarmAgent heartbeat, live view, remote access, screenshots, logs,
-  process control, remote update, and file transfer.
-- FarmAgent RTT ping shown in Windows cards.
-- FarmAgent logs written to `%PROGRAMDATA%\DroidFleet\agent.log` with rotation.
-- FarmAgent EXE includes Android Platform Tools and reports Android devices
-  connected to the managed Windows computer.
-- Separate Android FarmAgent APK with a predefined server endpoint.
-- Connection modes: `self-host`, `ngrok`, and `external server`.
-- Android ADB transport is separate from FarmAgent networking:
-  `auto`, `USB`, and `Wi-Fi ADB`.
+## Core capabilities
 
-## Platform support
+- Android and PC system discovery and status monitoring.
+- Device cards with hardware, battery, ADB/IP, and OS details.
+- Embedded scrcpy preview inside the main window.
+- Batch actions: screenshot, reboot, reconnect, install/uninstall APK, and allowlisted shell operations.
+- Full logcat view with filtering, buffer clearing, and export.
+- Windows/Linux FarmAgent heartbeat, screenshots, logs, local process control, and file transfer.
+- Separate Android APK agent with a predefined server endpoint.
+- Secure-by-default transport: HTTPS-only for remote `SERVER_URL`, loopback only with explicit opt-in.
+- Encrypted-at-rest account storage in `data/accounts.enc`.
+
+## Architecture
+
+- GUI: primary DroidFleet interface on Windows.
+- Android transport: `adb` via `AdbClient` and `DeviceMonitor`.
+- PC systems: host connection and monitoring through the local and network control layer.
+- Windows/Linux FarmAgent: heartbeat and commands over HTTPS/self-host endpoints.
+- Accounts: `app/accounts/repository.py` stores imported records in encrypted-at-rest storage.
+- Device/task runtime state is kept in the project's local registry layer; sensitive secrets are never written in plain text.
+- Logs/screenshots: `data/logs` and `data/screenshots` for user-visible artifacts and audit trails.
+
+## Supported platforms
 
 | Component | Windows | Linux/macOS |
-|---|---:|---:|
-| Python package and FarmAgent protocol | Supported | Supported |
-| DroidFleet GUI | Primary platform | Not production-tested |
-| Android ADB modules and CLI | Supported with `adb` | Supported with `adb` |
-| Embedded scrcpy window | Supported | Not supported |
-| FarmAgent input and screenshots | Full Windows implementation | Supported when a desktop session is available |
-
-Linux FarmAgent can run as a Python process or systemd service, uses `adb` from
-`PATH`, and reports `Linux` in the host card. Screenshot/input operations on
-Linux require an available desktop session (`DISPLAY` or a Wayland-compatible
-environment).
+|---|---|---|
+| Python runtime | Supported | Supported |
+| DroidFleet GUI | Primary platform | Not the main production target |
+| Android ADB | Supported | Supported |
+| Embedded scrcpy | Supported | Not supported |
+| FarmAgent input and screenshots | Full Windows implementation | Supported with a desktop session |
 
 ## Installation
 
-Requirements: Windows 10/11 and Python 3.12 or newer.
+Requirements: Windows 10/11 and Python 3.13.
 
-1. Install Python from <https://www.python.org/downloads/>.
-2. Install Android Platform Tools and make sure `adb.exe` is available on
-   `PATH`, or configure it:
+1. Install Python 3.13 from <https://www.python.org/downloads/>.
+2. Install Android Platform Tools and ensure `adb.exe` is available on `PATH`.
 
    ```powershell
    $env:DROIDFLEET_ADB = "C:\tools\platform-tools\adb.exe"
    ```
 
-3. Open the project directory and install it in editable mode:
+3. Install the package in editable mode:
 
    ```powershell
-   py -3 -m pip install -e .
+   py -3.13 -m pip install -e .
    ```
 
 4. Start the GUI:
 
    ```powershell
-   py -3 farm_bot.py
+   py -3.13 farm_bot.py
    ```
 
-   Alternative:
+   Or:
 
    ```powershell
-   py -3 -m app.main
+   py -3.13 -m app.main
    ```
 
-## Android and ADB
+## Connection policy
 
-Enable USB debugging on the Android device and accept the RSA prompt.
+The production profile only accepts HTTPS server URLs. Loopback access is allowed only when explicitly enabled:
 
-```bash
-adb devices
+```powershell
+$env:DROIDFLEET_SERVER = "https://server.example/api/agent/heartbeat"
+$env:DROIDFLEET_ALLOW_INSECURE_LOOPBACK = "true"  # localhost/debug only
 ```
 
-The device should be in the `device` state. For wireless ADB, use the standard
-`adb tcpip` and `adb connect` commands. The Android transport setting can be
-configured globally and separately for each device.
+Supported default transport modes are:
 
-Android ADB does not use ngrok. The `NGROK` label applies only to FarmAgent
-cards. DroidFleet and scrcpy use the same discovered ADB binary, preventing
-stalls caused by competing ADB servers. DroidFleet uses isolated ADB port
-`5038` by default instead of the shared `5037`; configure it with
-`DROIDFLEET_ADB_SERVER_PORT`.
+- `self-host` over a protected internal network;
+- `external server` with an HTTPS endpoint;
+- `localhost` only for local debug and only under explicit permission.
 
 ## FarmAgent
 
-The DroidFleet server listens on port `8765`. To start an agent manually:
+The DroidFleet server listens on port `8765`.
 
 ```powershell
-$env:DROIDFLEET_SERVER = "http://SERVER_IP:8765/api/agent/heartbeat"
-py -3 agent/agent.py
+$env:DROIDFLEET_SERVER = "https://server.example/api/agent/heartbeat"
+py -3.13 agent/agent.py
 ```
 
 Build a standalone Windows agent:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File build_agent.ps1
+powershell -ExecutionPolicy Bypass -File .\build_agent.ps1
 ```
 
-The result is `dist/FarmAgent.exe`. The build script downloads the official
-Windows Platform Tools when needed and embeds `adb.exe`, `AdbWinApi.dll`, and
-`AdbWinUsbApi.dll` into the executable. In restricted networks, place the
-Platform Tools archive contents in the local `platform-tools` directory first.
-
-The managed Windows computer can therefore report its connected Android
-devices to the DroidFleet host. Replace the old executable on that computer
-with the newly built `FarmAgent.exe`.
+The output is written to `dist/FarmAgent.exe`.
 
 ### Linux FarmAgent
 
-On Linux, install Python 3.10+, `adb` (when Android discovery is needed), and
-run:
+On Linux, install Python 3.13 and `adb` when Android discovery is required, then run:
 
 ```bash
 sudo apt update
@@ -134,87 +120,54 @@ DROIDFLEET_SERVER="https://your-server.example/api/agent/heartbeat" \
   ./build_agent.sh
 ```
 
-The result is `dist/FarmAgent-linux`. Copy it to the Linux computer and run:
+The resulting binary is `dist/FarmAgent-linux`.
 
-```bash
-chmod +x FarmAgent-linux
-DROIDFLEET_SERVER="https://your-server.example/api/agent/heartbeat" \
-  ./FarmAgent-linux
+## Android APK farm agent
+
+The separate Android client in [android-agent/](android-agent/) sends heartbeats directly to a configured endpoint and does not replace the desktop ADB flow.
+
+Before building, set the server URL in `android-agent/app/build.gradle.kts`:
+
+```kotlin
+buildConfigField("String", "FLEET_SERVER_URL",
+    "\"https://your-server.example/api/agent/heartbeat\"")
 ```
 
-The Linux agent uses a stable `linux-*` identity and stores state under
-`~/.local/state/droidfleet`. It can run directly or as a systemd service. The
-GUI also provides a “Build Linux FarmAgent” button when Bash/WSL is available.
-
-Process paths are configured with:
-
-- `DROIDFLEET_ROBLOX`
-- `DROIDFLEET_PYTHON_BOT`
-- `DROIDFLEET_FARM_WORKER`
-
-FarmAgent does not execute arbitrary commands received from the network.
-
-### File transfer
-
-Use the `SEND FILE` action in the Windows FarmAgent view to select a local file
-and a destination path on the managed PC. Files are transferred through the
-current self-host/ngrok/external-server channel, verified with SHA-256, and
-limited to 50 MB. An empty destination uses the remote user's `Downloads`
-directory.
-
-### Remote update
-
-The `UPDATE` action downloads the new EXE, verifies its SHA-256 checksum,
-replaces the running executable through a temporary launcher, and restarts the
-agent. If `FarmAgent-start.cmd` is not published, the agent creates a launcher
-locally.
-
-### Network errors
-
-`SSL: UNEXPECTED_EOF_WHILE_READING` indicates a temporary TLS/ngrok tunnel
-disconnect before an HTTP response, not an Android ADB failure. FarmAgent
-retries with exponential backoff and creates a fresh TLS context for each
-attempt. The endpoint can be checked with:
-
-```text
-https://your-ngrok-host.example/api/agent/config
-```
-
-Multiple FarmAgent instances can use the same ngrok endpoint. Command polling
-defaults to one request per second with a small random jitter so agents do not
-create a synchronized request burst. Override it with
-`DROIDFLEET_COMMAND_POLL` if needed.
-
-## Android FarmAgent APK
-
-The separate native Android client does not use ADB or replace the desktop
-Android controller. It sends heartbeat and status polling requests directly to
-the configured server.
-
-Build it with:
+Then build:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\build_android_agent.ps1 `
   -ServerUrl "https://your-server.example/api/agent/heartbeat"
 ```
 
-The APK is generated at:
+## Security and storage
 
-`android-agent/app/build/outputs/apk/release/app-release.apk`
+The project follows production-safe defaults:
+
+- HTTPS-only remote endpoints.
+- Loopback only with explicit opt-in.
+- Token hashing before persistence.
+- Encrypted-at-rest account secrets in `data/accounts.enc`.
+- Safe file transfer path and size limits.
+- Redaction of secret-bearing values in logs.
 
 ## Data and logs
 
-- Devices: `data/devices.json`
-- Tasks: `data/tasks.json`
-- Accounts: `data/accounts.json`
+- Accounts: `data/accounts.enc`
+- Runtime registry and task state: project data directory with no plaintext secrets stored on disk
 - GUI logs: `data/logs`
 - Screenshots: `data/screenshots`
 - FarmAgent log: `%PROGRAMDATA%\DroidFleet\agent.log`
 
-Do not delete the `data` directory if you want to preserve devices, names,
-groups, accounts, and tasks.
+Do not delete the `data` directory if you want to preserve devices, names, groups, accounts, and tasks.
 
 ## CLI examples
+
+```powershell
+py -3.13 -m app.cli --help
+```
+
+See [docs/production_security.md](docs/production_security.md) for the hardening checklist.
 
 After installing the project in editable mode:
 
@@ -233,7 +186,7 @@ py -3 -m pytest -q
 py -3 -m compileall -q app agent tests
 ```
 
-Current project version: `0.3.0` (alpha). Unit tests and compilation pass, but
+Current project version: `0.3.2` (alpha). Unit tests and compilation pass, but
 a dedicated 5–10 device load test and a long-running soak test are still
 required before a `1.0` release.
 

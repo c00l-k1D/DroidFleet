@@ -5,7 +5,6 @@ import hashlib
 import io
 import json
 import subprocess
-import socket
 import shutil
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
@@ -14,6 +13,14 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from PIL import Image, ImageTk
 
+
+def _project_window_icons():
+    base_dir = Path(__file__).resolve().parents[1]
+    png_path = base_dir / "logo.png"
+    ico_path = base_dir / "logo.ico"
+    return (png_path if png_path.exists() else None, ico_path if ico_path.exists() else None)
+
+
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -21,7 +28,7 @@ from app import config
 from app.connection import ConnectionProfile
 from app.accounts.repository import AccountRepository
 from app.agent_server import AgentServer, AgentStore
-from app.ngrok import NgrokTunnel
+from app.production_security import ApprovalGate, AuditLogger, Permission, SecurityContext, Role
 from app.devices.registry import DeviceRegistry
 from app.fleet_logging import FleetLogger
 from app.adb.client import AdbClient
@@ -45,18 +52,27 @@ from app.tasks.repository import TaskRepository
 class AndroidController:
     @staticmethod
     def local_agent_base_url() -> str:
-        try:
-            probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            probe.connect(("192.0.2.1", 80))
-            address = probe.getsockname()[0]
-            probe.close()
-        except OSError:
-            address = socket.gethostbyname(socket.gethostname())
-        return f"http://{address}:{config.AGENT_SERVER_PORT}/api/agent"
+        # Keep the internal agent loopback-only: HTTP is tolerated only for localhost-debug, never for
+        # exported LAN or public addresses. The service itself listens on 0.0.0.0, but the client URL
+        # must remain loopback-safe and production-friendly.
+        return f"http://127.0.0.1:{config.AGENT_SERVER_PORT}/api/agent"
 
     def __init__(self, root):
         self.root = root
+        png_path, ico_path = _project_window_icons()
+        if ico_path is not None:
+            try:
+                root.iconbitmap(str(ico_path))
+            except Exception:
+                pass
+        if png_path is not None:
+            try:
+                root.iconphoto(True, tk.PhotoImage(file=str(png_path)))
+            except Exception:
+                pass
         self.logger = FleetLogger()
+        self.security_context = SecurityContext(user="local-admin", role=Role.SUPERADMIN, mfa_verified=True)
+        self.audit_logger = AuditLogger(config.DATA_DIR / "audit.jsonl")
         self.account_repository = AccountRepository(config.ACCOUNTS_FILE)
         self.device_registry = DeviceRegistry(config.DEVICES_FILE)
         root.title("DroidFleet")
@@ -92,7 +108,6 @@ class AndroidController:
         self.reconnect = ReconnectService(self.client, self.logger)
         self.monitor = DeviceMonitor(self.client, self._on_devices_changed)
         self.agent_server = None
-        self.ngrok = None
         self.connection_profile = ConnectionProfile.from_value(config.CONNECTION_MODE)
         style = ttk.Style(root)
         style.configure("Sidebar.TFrame", background="#eef2f5")
@@ -119,14 +134,7 @@ class AndroidController:
             self.agent_server.store.set_process_definitions(config.PROCESS_DEFINITIONS)
             self.agent_server.start_background()
             self.server_status.config(text="● SERVER OK", fg="#51d88a")
-            if self.connection_profile.requires_tunnel:
-                self.ngrok = NgrokTunnel(config.AGENT_SERVER_PORT, authtoken=config.NGROK_AUTHTOKEN, region=config.NGROK_REGION)
-                public_url = self.ngrok.start()
-                self.connection_profile.configure_store(self.agent_server.store, self.local_agent_base_url(), public_url)
-                self.server_status.config(text=f"● {self.connection_profile.label} {public_url}", fg="#51d88a")
-                self.logger.info(f"Ngrok endpoint: {public_url}/api/agent/heartbeat")
-            else:
-                self.connection_profile.configure_store(self.agent_server.store, self.local_agent_base_url())
+            self.connection_profile.configure_store(self.agent_server.store, self.local_agent_base_url())
         except (OSError, RuntimeError) as exc:
             self.logger.error(f"Не удалось запустить сервер агентов: {exc}")
             self.server_status.config(text="● SERVER ERROR", fg="#ff9f43")
@@ -179,12 +187,10 @@ class AndroidController:
             return
         server_url = ""
         if self.connection_profile.requires_agent_url:
-            public_url = (self.ngrok.public_url if self.ngrok else "") or ""
-            initial_url = self.connection_profile.build_agent_url(public_url)
             server_url = simpledialog.askstring(
                 "FarmAgent connection",
                 "Ссылка для подключения агента:",
-                initialvalue=initial_url,
+                initialvalue="https://server.example/api/agent/heartbeat",
                 parent=self.root,
             )
             if not server_url:
@@ -239,9 +245,7 @@ class AndroidController:
         server_url = simpledialog.askstring(
             "Linux FarmAgent connection",
             "Ссылка для подключения Linux-агента:",
-            initialvalue=self.connection_profile.build_agent_url(
-                (self.ngrok.public_url if self.ngrok else "") or ""
-            ),
+            initialvalue="https://server.example/api/agent/heartbeat",
             parent=self.root,
         )
         if not server_url:
@@ -305,7 +309,7 @@ class AndroidController:
         server_url = simpledialog.askstring(
             "Android FarmAgent",
             "Ссылка сервера для APK (/api/agent/heartbeat):",
-            initialvalue=self.connection_profile.build_agent_url((self.ngrok.public_url if self.ngrok else "") or ""),
+            initialvalue="https://server.example/api/agent/heartbeat",
             parent=self.root,
         )
         if not server_url:
@@ -641,10 +645,65 @@ class AndroidController:
         except (OSError, RuntimeError, TimeoutError) as exc:
             self.logger.error(f"Screenshot {serial}: {exc}")
 
+    def _enforce_operation_policy(self, permission, action_name, targets):
+        if not targets:
+            return False
+        permission_name = Permission(permission) if isinstance(permission, str) else permission
+        target_count = len(targets)
+        decision = self.security_context.can_perform(permission_name, target_count)
+        if not decision:
+            self.audit_logger.log(
+                "security.operation.denied",
+                {
+                    "user": self.security_context.user,
+                    "role": self.security_context.role.value,
+                    "action": action_name,
+                    "targets": target_count,
+                    "permission": permission_name.value,
+                },
+                "denied",
+            )
+            warning("Security", f"Операция {action_name} запрещена для роли {self.security_context.role.value}.")
+            return False
+        if ApprovalGate.requires_approval(action_name, target_count):
+            if not ApprovalGate.approve(
+                action_name,
+                target_count,
+                role=self.security_context.role,
+                mfa_verified=self.security_context.mfa_verified,
+            ):
+                self.audit_logger.log(
+                    "security.operation.denied",
+                    {
+                        "user": self.security_context.user,
+                        "role": self.security_context.role.value,
+                        "action": action_name,
+                        "targets": target_count,
+                        "reason": "approval_required",
+                    },
+                    "denied",
+                )
+                warning("Security", f"Для {action_name} требуется дополнительное подтверждение и MFA.")
+                return False
+        self.audit_logger.log(
+            "security.operation.approved",
+            {
+                "user": self.security_context.user,
+                "role": self.security_context.role.value,
+                "action": action_name,
+                "targets": target_count,
+                "permission": permission_name.value,
+            },
+            "approved",
+        )
+        return True
+
     def mass_restart(self):
         targets = self.get_targets()
         if not targets:
             warning("Restart", "Нет выбранных устройств.")
+            return
+        if not self._enforce_operation_policy(Permission.DEVICE_REBOOT, "device.reboot", targets):
             return
         self.commands.run(targets, lambda serial: self.client.run(["shell", "reboot"], serial, timeout=10))
         self._set_status(f"Restart отправлен: {len(targets)}")
@@ -653,6 +712,8 @@ class AndroidController:
         targets = targets or self.get_targets()
         if not targets:
             warning("Reconnect", "Нет выбранных устройств.")
+            return
+        if not self._enforce_operation_policy(Permission.DEVICE_REBOOT, "device.reconnect", targets):
             return
         self.reconnect_executor.submit(lambda: [self.reconnect.reconnect(serial) for serial in targets])
         self._set_status(f"Reconnect отправлен: {len(targets)}")
@@ -678,6 +739,8 @@ class AndroidController:
     def mass_keyevent(self, key):
         targets = self.get_targets()
         if not targets: warning("ADB", "Нет устройств для выполнения команды."); return
+        if not self._enforce_operation_policy(Permission.DEVICE_REBOOT, "device.input", targets):
+            return
         self.logger.info(f"Команда {key} отправлена на {len(targets)} устройств")
         self.commands.run(targets, lambda serial: send_keyevent(self.client, serial, key)); self._set_status(f"{key}\nОтправлено: {len(targets)}")
 
@@ -696,6 +759,8 @@ class AndroidController:
         command = self.toolbar.command.get().strip(); targets = self.get_targets(force_all)
         if not command: return
         if not targets: warning("ADB", "Нет устройств."); return
+        if not self._enforce_operation_policy(Permission.SHELL_EXECUTE, "shell.execute", targets):
+            return
         self.logger.info(f"Shell-команда отправлена на {len(targets)} устройств: {command}")
         self.commands.run(targets, lambda serial: run_shell(self.client, serial, command.split())); self._set_status(f"Команда отправлена\nУстройств: {len(targets)}")
 
@@ -713,6 +778,8 @@ class AndroidController:
         targets = self.get_targets()
         if not targets:
             warning("ADB", "Нет устройств для установки APK.")
+            return
+        if not self._enforce_operation_policy(Permission.FILE_TRANSFER, "file.transfer", targets):
             return
         self.logger.info(f"Начата установка {Path(apk_path).name} на {len(targets)} устройств")
         self.commands.run(targets, lambda serial: self._install_worker(serial, apk_path))
@@ -743,6 +810,8 @@ class AndroidController:
         targets = self.get_targets()
         if not targets:
             warning("Аккаунты", "Нет устройств для импорта файла аккаунтов.")
+            return
+        if not self._enforce_operation_policy(Permission.FILE_TRANSFER, "file.transfer", targets):
             return
         self.account_repository.add_import(Path(file_path), targets)
         self.logger.info(f"Начат импорт файла аккаунтов {Path(file_path).name} на {len(targets)} устройств")
@@ -797,6 +866,8 @@ class AndroidController:
             if package_name and not targets:
                 warning("Приложение", "Нет устройств для удаления приложения.")
             return
+        if not self._enforce_operation_policy(Permission.SETTINGS_WRITE, "settings.write", targets):
+            return
         self.commands.run(targets, lambda serial: self._app_worker(serial, package_name, uninstall_app, "Удаление"))
         self._set_status(f"Удаление приложения отправлено\nУстройств: {len(targets)}")
 
@@ -806,6 +877,8 @@ class AndroidController:
         if not package_name or not targets:
             if package_name and not targets:
                 warning("Приложение", "Нет устройств для очистки приложения.")
+            return
+        if not self._enforce_operation_policy(Permission.SETTINGS_WRITE, "settings.write", targets):
             return
         self.commands.run(targets, lambda serial: self._app_worker(serial, package_name, cleanup_app, "Очистка данных"))
         self._set_status(f"Очистка данных отправлена\nУстройств: {len(targets)}")
@@ -1478,7 +1551,7 @@ The FarmAgent screen is embedded in the main Dashboard window.
         window = tk.Toplevel(self.root)
         window.title("DroidFleet - Settings")
         window.geometry("700x650")
-        values = {"Preview FPS": str(config.PREVIEW_FPS), "Preview quality": str(config.PREVIEW_WIDTH), "Connection timeout": "5", "Scan interval": str(config.DEVICE_CHECK_INTERVAL), "Agent port": str(config.AGENT_SERVER_PORT), "Ngrok region": config.NGROK_REGION}
+        values = {"Preview FPS": str(config.PREVIEW_FPS), "Preview quality": str(config.PREVIEW_WIDTH), "Connection timeout": "5", "Scan interval": str(config.DEVICE_CHECK_INTERVAL), "Agent port": str(config.AGENT_SERVER_PORT)}
         tk.Label(window, text="SETTINGS", font=("Segoe UI", 14, "bold")).pack(anchor="w", padx=16, pady=(16, 8))
         language_row = ttk.Frame(window)
         language_row.pack(fill="x", padx=16, pady=4)
@@ -1490,7 +1563,7 @@ The FarmAgent screen is embedded in the main Dashboard window.
         mode_row.pack(fill="x", padx=16, pady=4)
         ttk.Label(mode_row, text="Connection mode", width=24).pack(side="left")
         mode_var = tk.StringVar(value=config.CONNECTION_MODE)
-        ttk.Combobox(mode_row, textvariable=mode_var, state="readonly", values=("local", "ngrok", "external"), width=18).pack(side="left")
+        ttk.Combobox(mode_row, textvariable=mode_var, state="readonly", values=("local", "external"), width=18).pack(side="left")
         android_mode_row = ttk.Frame(window)
         android_mode_row.pack(fill="x", padx=16, pady=4)
         ttk.Label(android_mode_row, text="Android ADB transport", width=24).pack(side="left")
@@ -1511,12 +1584,6 @@ The FarmAgent screen is embedded in the main Dashboard window.
             field.insert(0, value)
             field.pack(side="left", fill="x", expand=True)
             fields[name] = field
-        token_row = ttk.Frame(window)
-        token_row.pack(fill="x", padx=16, pady=4)
-        ttk.Label(token_row, text="Ngrok auth token", width=24).pack(side="left")
-        token_field = ttk.Entry(token_row, show="*")
-        token_field.insert(0, config.NGROK_AUTHTOKEN)
-        token_field.pack(side="left", fill="x", expand=True)
         ttk.Label(
             window,
             text=(
@@ -1538,8 +1605,6 @@ The FarmAgent screen is embedded in the main Dashboard window.
                 self.connection_profile = ConnectionProfile.from_value(config.CONNECTION_MODE)
                 config.ANDROID_CONNECTION_MODE = android_mode_var.get()
                 config.AGENT_SERVER_PORT = max(1, int(fields["Agent port"].get()))
-                config.NGROK_REGION = fields["Ngrok region"].get().strip()
-                config.NGROK_AUTHTOKEN = token_field.get().strip()
                 definitions = json.loads(process_text.get("1.0", "end"))
                 if not isinstance(definitions, dict) or not definitions:
                     raise ValueError("Process definitions must be a non-empty JSON object")
@@ -1563,8 +1628,6 @@ The FarmAgent screen is embedded in the main Dashboard window.
         self._set_status("Язык изменён" if language == "Русский" else "Language changed")
 
     def on_close(self):
-        if self.ngrok:
-            self.ngrok.stop()
         if self.agent_server:
             self.agent_server.close()
         self.preview.close(); self.commands.close(); self.input_executor.shutdown(wait=False, cancel_futures=True); self.hardware_executor.shutdown(wait=False, cancel_futures=True); self.reconnect_executor.shutdown(wait=False, cancel_futures=True); self.monitor_executor.shutdown(wait=False, cancel_futures=True); self.stop_scrcpy(); self.root.destroy()

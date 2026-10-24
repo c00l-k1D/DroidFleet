@@ -36,9 +36,6 @@ LOGGER = logging.getLogger("FarmAgent")
 def configure_autostart(server_url: str) -> None:
     if not getattr(sys, "frozen", False) or os.name != "nt" or not server_url:
         return
-    hostname = urlparse(server_url).hostname or ""
-    if not hostname.endswith((".ngrok-free.dev", ".ngrok-free.app", ".ngrok.app", ".ngrok.io")):
-        return
     import winreg
 
     command = f'"{Path(sys.executable).resolve()}" --server "{server_url}"'
@@ -82,8 +79,8 @@ def request_json(url: str, payload: dict | None = None) -> dict:
     is_https = urlparse(url).scheme == "https"
     for attempt in range(config.NETWORK_RETRIES + 1):
         try:
-            # Build a fresh TLS context for every retry. Ngrok may close the
-            # previous edge connection while the agent is still polling.
+            # Build a fresh TLS context for every retry. A reverse proxy or tunnel
+            # may close the previous edge connection while the agent is still polling.
             ssl_context = ssl.create_default_context() if is_https else None
             request = Request(
                 url,
@@ -103,7 +100,7 @@ def request_json(url: str, payload: dict | None = None) -> dict:
                 data = response.read()
                 return json.loads(data.decode("utf-8")) if data else {}
         except HTTPError as exc:
-            # Ngrok may briefly return 502/503/504 while its edge reconnects.
+            # Temporary tunnel or edge hiccups may briefly return 502/503/504.
             # Treat those responses like a broken TLS socket; permanent 4xx
             # responses still fail immediately and remain visible to callers.
             if exc.code not in {429, 502, 503, 504}:
