@@ -53,7 +53,7 @@ Python-процесс или systemd-сервис, использует `adb` и
 
 ## Установка с нуля
 
-Требуется Windows 10/11 и Python 3.10 или новее.
+Требуется Windows 10/11 и Python 3.12 или новее.
 
 1. Установите Python с сайта <https://www.python.org/downloads/>.
    При установке включите `Add Python to PATH`.
