@@ -14,7 +14,7 @@ android {
         versionCode = 30
         versionName = "0.3.0"
         val fleetServerUrl = project.findProperty("fleetServerUrl") as String?
-            ?: "http://10.0.2.2:8765/api/agent/heartbeat"
+            ?: "https://10.0.2.2:8765/api/agent/heartbeat"
         buildConfigField("String", "FLEET_SERVER_URL", "\"$fleetServerUrl\"")
     }
 }

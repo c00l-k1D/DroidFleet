@@ -2,6 +2,8 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from app.security import decrypt_secret, encrypt_secret
+
 
 class AccountRepository:
     def __init__(self, path: Path):
@@ -25,12 +27,14 @@ class AccountRepository:
         if not self.path.exists():
             return []
         try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            raw = self.path.read_text(encoding="utf-8")
+            data = json.loads(decrypt_secret(raw))
+        except (OSError, ValueError, json.JSONDecodeError):
             return []
         return data if isinstance(data, list) else []
 
     def _write(self, entries: list[dict]):
         temporary = self.path.with_suffix(self.path.suffix + ".tmp")
-        temporary.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8")
+        payload = encrypt_secret(json.dumps(entries, ensure_ascii=False, indent=2))
+        temporary.write_text(payload, encoding="utf-8")
         temporary.replace(self.path)

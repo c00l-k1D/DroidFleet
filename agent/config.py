@@ -4,9 +4,18 @@ import os
 import time
 from pathlib import Path
 
+from app.security import hash_token, validate_server_url
+
 AGENT_VERSION = "0.3.0"
 DEVICE_ID = os.environ.get("DROIDFLEET_DEVICE_ID")
-SERVER_URL = os.environ.get("DROIDFLEET_SERVER", "http://127.0.0.1:8765/api/agent/heartbeat")
+SERVER_URL = os.environ.get("DROIDFLEET_SERVER", "https://127.0.0.1:8765/api/agent/heartbeat")
+try:
+    SERVER_URL = validate_server_url(
+        SERVER_URL,
+        allow_insecure_loopback=os.environ.get("DROIDFLEET_ALLOW_INSECURE_LOOPBACK", "false").strip().lower() in {"1", "true", "yes", "on"},
+    )
+except ValueError:
+    SERVER_URL = "https://127.0.0.1:8765/api/agent/heartbeat"
 HEARTBEAT_INTERVAL = int(os.environ.get("DROIDFLEET_HEARTBEAT", "10"))
 COMMAND_POLL_INTERVAL = max(0.5, float(os.environ.get("DROIDFLEET_COMMAND_POLL", "1.0")))
 REQUEST_TIMEOUT = int(os.environ.get("DROIDFLEET_TIMEOUT", "5"))
@@ -19,6 +28,11 @@ SCREENSHOT_MAX_WIDTH = int(os.environ.get("DROIDFLEET_SCREENSHOT_MAX_WIDTH", "12
 MAX_TRANSFER_BYTES = max(1, int(os.environ.get("DROIDFLEET_MAX_TRANSFER_MB", "50"))) * 1024 * 1024
 STREAM_FPS = max(1, min(30, int(os.environ.get("DROIDFLEET_STREAM_FPS", "30"))))
 PYAutoGUI_FAILSAFE = os.environ.get("DROIDFLEET_PYAUTOGUI_FAILSAFE", "0").casefold() in {"1", "true", "yes", "on"}
+AGENT_ID = os.environ.get("DROIDFLEET_AGENT_ID", "")
+AGENT_TOKEN = os.environ.get("DROIDFLEET_AGENT_TOKEN", "")
+AGENT_TOKEN_HASH, AGENT_TOKEN_SALT = ("", b"") if not AGENT_TOKEN else hash_token(AGENT_TOKEN)
+REVOKED_TOKENS = {token.strip() for token in os.environ.get("DROIDFLEET_REVOKED_TOKENS", "").split(",") if token.strip()}
+ALLOW_SHELL = os.environ.get("DROIDFLEET_ALLOW_SHELL", "false").strip().lower() in {"1", "true", "yes", "on"}
 UPDATE_COMPLETED = False
 LAST_PING_MS = None
 STARTED_AT = time.time()

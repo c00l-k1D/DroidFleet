@@ -207,7 +207,7 @@ def test_request_json_uses_keep_alive_for_long_running_agents(monkeypatch):
     assert captured["connection"] == "keep-alive"
 
 
-def test_request_json_retries_transient_ngrok_http_errors(monkeypatch):
+def test_request_json_retries_transient_http_502_errors(monkeypatch):
     calls = []
 
     class Response:
@@ -225,7 +225,7 @@ def test_request_json_retries_transient_ngrok_http_errors(monkeypatch):
     def fake_urlopen(request, timeout, context):
         calls.append(request)
         if len(calls) == 1:
-            raise HTTPError(request.full_url, 502, "ngrok edge", {}, None)
+            raise HTTPError(request.full_url, 502, "transient upstream error", {}, None)
         return Response()
 
     monkeypatch.setattr("agent.agent.urlopen", fake_urlopen)

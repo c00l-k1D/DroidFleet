@@ -9,9 +9,11 @@ from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+from app.production_security import SignedCommand
+
 
 class AgentStore:
-    def __init__(self, stale_after: int = 30):
+    def __init__(self, stale_after: int = 30, signing_secret: str | None = None):
         self.stale_after = stale_after
         self._agents: dict[str, dict] = {}
         self._commands: dict[str, list[dict]] = {}
@@ -21,6 +23,8 @@ class AgentStore:
         self._process_definitions: dict[str, dict[str, str]] = {}
         self._agent_base_url = ""
         self._updating: set[str] = set()
+        self._signing_secret = signing_secret or "droidfleet-command-secret"
+        self._replay_cache: dict[str, float] = {}
         self._lock = threading.Lock()
 
     def update(self, payload: dict):
@@ -53,6 +57,8 @@ class AgentStore:
         if command not in allowed:
             raise ValueError(f"unsupported command: {command}")
         item = {"command_id": f"cmd-{uuid.uuid4().hex}", "command": command, "process": process, "params": dict(params or {})}
+        signed = SignedCommand.create({"device_id": str(device_id), "action": command, "params": item["params"], "command_id": item["command_id"]}, self._signing_secret, ttl_seconds=300)
+        item["signed_command"] = signed
         with self._lock:
             queue = self._commands.setdefault(device_id, [])
             if command == "SCREENSHOT":
@@ -70,6 +76,9 @@ class AgentStore:
                     self._agents[device_id]["status"] = "UPDATING"
             queue.append(item)
         return item
+
+    def validate_signed_command(self, envelope: dict) -> bool:
+        return SignedCommand.verify(envelope, self._signing_secret, replay_cache=self._replay_cache)
 
     def next_command(self, device_id: str):
         with self._lock:
@@ -186,6 +195,10 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/agents/command":
             try:
                 payload = self._read_json()
+                signed = payload.get("signed_command") or payload
+                if not self.server.store.validate_signed_command(signed):
+                    self._send_json({"error": "invalid or expired signed command"}, 403)
+                    return
                 item = self.server.store.queue_command(payload.get("device_id", ""), payload.get("command", ""), payload.get("process", ""), payload.get("params"))
                 self._send_json(item, 202)
             except (ValueError, TypeError, json.JSONDecodeError) as exc:
@@ -210,7 +223,10 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
 
     def _read_json(self):
         length = int(self.headers.get("Content-Length", "0"))
-        return json.loads(self.rfile.read(length))
+        raw = self.rfile.read(length)
+        if not raw:
+            raise json.JSONDecodeError("empty body", "", 0)
+        return json.loads(raw)
 
     def log_message(self, format, *args):
         return
