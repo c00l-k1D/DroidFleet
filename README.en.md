@@ -51,7 +51,7 @@ environment).
 
 ## Installation
 
-Requirements: Windows 10/11 and Python 3.10 or newer.
+Requirements: Windows 10/11 and Python 3.12 or newer.
 
 1. Install Python from <https://www.python.org/downloads/>.
 2. Install Android Platform Tools and make sure `adb.exe` is available on
